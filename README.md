@@ -1,368 +1,332 @@
-# ⚡ Empathy Engine
-
-> Emotionally-aware Text-to-Speech that dynamically modulates vocal parameters based on detected emotion in the source text.
+# Empathy Engine
+### Installation & Operations Guide
+*Emotionally-aware TTS with Multi-Label Emotion Vectors*
 
 ---
 
 ## Table of Contents
-- [Overview](#overview)
-- [Architecture](#architecture)
-- [Project Structure](#project-structure)
-- [Setup](#setup)
-- [Running the App](#running-the-app)
-- [Emotion → Voice Mapping Logic](#emotion--voice-mapping-logic)
-- [TTS Engine Comparison](#tts-engine-comparison)
-- [Fine-Tuning the Emotion Model](#fine-tuning-the-emotion-model)
-- [API Reference](#api-reference)
-- [Design Decisions](#design-decisions)
+
+1. [Overview](#1-overview)
+2. [System Requirements](#2-system-requirements)
+3. [Installation](#3-installation)
+4. [Project Setup](#4-project-setup)
+5. [Download Training Data](#5-download-training-data-optional-but-recommended)
+6. [Testing Each Module](#6-testing-each-module)
+7. [Running the Application](#7-running-the-application)
+8. [Switching Between Detectors](#8-switching-between-detectors)
+9. [Troubleshooting](#9-troubleshooting)
+10. [Complete Environment Summary](#10-complete-environment-summary)
 
 ---
 
-## Overview
+## 1. Overview
 
-Standard TTS systems produce flat, monotonic speech. The Empathy Engine adds an emotional layer:
+The Empathy Engine is a text-to-speech pipeline that detects emotion in input text and dynamically modulates vocal parameters to produce expressive, human-sounding audio output. Unlike standard TTS systems that produce flat monotonic speech, the Empathy Engine detects 15 simultaneous emotion dimensions and maps them to a calibrated combination of speech rate, pitch, and volume.
 
-1. **Detects** the emotion in input text (joy, anger, sadness, fear, surprise, disgust, neutral)
-2. **Measures** its intensity on a 0–1 scale
-3. **Maps** both to vocal parameters (rate, pitch, volume, emphasis)
-4. **Synthesizes** expressive audio via your chosen TTS engine
+**Key capabilities:**
 
-**Example:**
+- 15-dimensional emotion vector covering base emotions and sales-specific states
+- Multi-label detection — a speaker can be surprised and angry simultaneously
+- Pitch constrained to 175–225 Hz for speaker identity consistency
+- Rate modulation with perceptible minimum thresholds via librosa
+- Punctuation-aware synthesis with calibrated pauses at commas, periods, question marks
+- Neural voice predictor that learns from usage data over time
+
+---
+
+## 2. System Requirements
+
+| Component | Requirement |
+|---|---|
+| Operating System | Ubuntu 20.04+ / Debian / macOS / WSL2 |
+| Python | 3.11 (required — librosa incompatible with 3.14) |
+| Conda | Miniconda or Anaconda |
+| ffmpeg | Required for audio format conversion |
+| espeak | Required for pyttsx3 (optional engine) |
+| RAM | 4 GB minimum, 8 GB recommended |
+| Disk | 2 GB for model cache + audio outputs |
+| Internet | Required for gTTS synthesis and model download |
+
+---
+
+## 3. Installation
+
+### 3.1 Install System Dependencies
+
+**Ubuntu / Debian / WSL:**
+```bash
+sudo apt update
+sudo apt install ffmpeg espeak espeak-data git -y
 ```
-Input:  "I can't believe how amazing this turned out!"
-Emotion: joy @ intensity 0.92
-Voice:   rate=126%  pitch=+3.2st  volume=+3.7dB  emphasis=strong
-Output:  joy_a3f8b2c1.mp3
+
+**macOS:**
+```bash
+brew install ffmpeg espeak
+```
+
+### 3.2 Create Conda Environment
+
+> **Important:** Always use Python 3.11. librosa and numba are incompatible with Python 3.14.
+
+```bash
+conda create -n empathy python=3.11 -y
+conda activate empathy
+```
+
+### 3.3 Install Python Packages
+
+```bash
+pip install transformers torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+pip install librosa soundfile soxr gTTS pydub
+pip install fastapi uvicorn python-multipart jinja2
+pip install python-dotenv numpy scipy requests platformdirs pooch
+pip install vaderSentiment
+```
+
+### 3.4 Verify Installation
+
+```bash
+python3 -c "import transformers, torch, librosa, soundfile, gtts, soxr; print('All OK')"
 ```
 
 ---
 
-## Architecture
+## 4. Project Setup
 
-```
-Text Input
-    │
-    ▼
-Emotion Detector ──────────────────► EmotionResult
-(VADER or Transformer)               label + intensity + scores
-    │
-    ▼
-Voice Mapper ──────────────────────► VoiceParams
-(intensity-scaled rules)             rate / pitch / volume / emphasis
-    │
-    ▼
-SSML Builder ──────────────────────► SSML string
-(<prosody> + <emphasis> + <break>)   (for cloud engines)
-    │
-    ▼
-TTS Engine ────────────────────────► audio file
-(pyttsx3 / gTTS / Google / ElevenLabs)
-```
+### 4.1 Folder Structure
 
----
-
-## Project Structure
+Create the following structure and place each file in the correct location:
 
 ```
 empathy_engine/
-│
-├── cli.py                          # Command-line interface
-├── pipeline.py                     # Core pipeline (wires all blocks)
+├── cli.py
+├── pipeline.py
 ├── requirements.txt
-├── .env.example                    # Copy to .env and configure
-│
+├── .env
 ├── emotion/
-│   ├── __init__.py                 # Factory: get_detector()
-│   ├── vader_detector.py           # Fast offline detector (VADER)
-│   └── transformer_detector.py     # Accurate detector (HuggingFace)
-│                                   # Also contains fine_tune() function
-│
+│   ├── __init__.py
+│   ├── transformer_detector.py
+│   └── vader_detector.py
 ├── tts/
-│   ├── __init__.py                 # Factory: get_engine()
-│   ├── voice_mapper.py             # Emotion → VoiceParams
-│   ├── ssml_builder.py             # VoiceParams → SSML string
+│   ├── __init__.py
+│   ├── voice_mapper.py
+│   ├── ssml_builder.py
 │   └── engines/
-│       ├── pyttsx3_engine.py       # Offline (no API key)
-│       ├── gtts_engine.py          # Google free TTS + pydub
-│       ├── google_cloud_engine.py  # Google Cloud TTS (SSML)
-│       └── elevenlabs_engine.py    # ElevenLabs (best quality)
-│
+│       ├── __init__.py
+│       ├── gtts_engine.py
+│       ├── pyttsx3_engine.py
+│       ├── google_cloud_engine.py
+│       └── elevenlabs_engine.py
 ├── web/
-│   ├── app.py                      # FastAPI server
+│   ├── __init__.py
+│   ├── app.py
 │   └── templates/
-│       └── index.html              # Web UI with audio player
-│
-└── utils/
-    ├── prepare_training_data.py    # Dataset prep for fine-tuning
-    └── evaluate.py                 # Accuracy / F1 evaluation
+│       └── index.html
+├── utils/
+│   ├── __init__.py
+│   ├── generate_training_data.py
+│   └── evaluate.py
+├── outputs/
+└── data/
 ```
 
----
+### 4.2 Create `__init__.py` Files
 
-## Setup
-
-### 1. Clone and create virtual environment
+These files must exist for Python to recognise each folder as a package:
 
 ```bash
-git clone https://github.com/yourname/empathy-engine.git
-cd empathy-engine
-python -m venv venv
-source venv/bin/activate        # Windows: venv\Scripts\activate
+cd ~/Documents/vlm/empathy_engine
+
+touch __init__.py
+touch emotion/__init__.py
+touch tts/__init__.py
+touch tts/engines/__init__.py
+touch web/__init__.py
+touch utils/__init__.py
+
+mkdir -p outputs data
 ```
 
-### 2. Install dependencies
+### 4.3 Configure `.env`
 
-```bash
-pip install -r requirements.txt
-```
-
-> **Note:** On Ubuntu/Debian, pyttsx3 needs espeak:
-> ```bash
-> sudo apt install espeak ffmpeg
-> ```
-> On macOS: `brew install espeak ffmpeg`
-
-### 3. Configure environment
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env`:
+Create a file named `.env` in the project root:
 
 ```env
-# Emotion model: "vader" (fast, offline) or "transformer" (accurate)
 EMOTION_MODEL=transformer
-
-# TTS engine: "pyttsx3" | "gtts" | "google_cloud" | "elevenlabs"
 TTS_ENGINE=gtts
-
-# Only needed for google_cloud:
-# GOOGLE_APPLICATION_CREDENTIALS=path/to/key.json
-
-# Only needed for elevenlabs:
-# ELEVENLABS_API_KEY=your_key_here
-# ELEVENLABS_VOICE_ID=21m00Tcm4TlvDq8ikWAM
+AUDIO_OUTPUT_DIR=outputs/
 ```
 
-### 4. (First run only) Download the transformer model
+To switch to the VADER detector (faster, offline):
 
-The HuggingFace model (~82MB) downloads automatically on first use and is cached at `~/.cache/huggingface/`. No manual step needed.
+```env
+EMOTION_MODEL=vader
+```
 
 ---
 
-## Running the App
+## 5. Download Training Data (Optional but Recommended)
 
-### CLI — single input
-
-```bash
-python cli.py "I can't believe how amazing this is!"
-```
-
-### CLI — demo mode (runs 7 preset emotional sentences)
+This step downloads the GoEmotions and ISEAR datasets to pre-train the neural voice predictor. Without this step the system uses the analytical fallback mapper, which still works well.
 
 ```bash
-python cli.py --demo
+mkdir -p data
+
+wget -P data https://storage.googleapis.com/gresearch/goemotions/data/full_dataset/goemotions_1.csv
+wget -P data https://storage.googleapis.com/gresearch/goemotions/data/full_dataset/goemotions_2.csv
+wget -P data https://storage.googleapis.com/gresearch/goemotions/data/full_dataset/goemotions_3.csv
+wget -P data https://raw.githubusercontent.com/niderhoff/nlp-datasets/master/data/ISEAR/isear.csv
 ```
 
-### CLI — batch from file
+Generate training data from downloaded datasets:
 
 ```bash
-python cli.py --file sentences.txt --tts gtts --emotion transformer
+python3 utils/generate_training_data.py
 ```
 
-### Web interface
+Train the neural voice predictor:
+
+```bash
+python3 -c "from tts.voice_mapper import train_voice_predictor; train_voice_predictor(epochs=3000)"
+```
+
+---
+
+## 6. Testing Each Module
+
+Run these in order to verify each component works before running the full pipeline.
+
+| Module | Test Command |
+|---|---|
+| Voice mapper | `python3 -m tts.voice_mapper` |
+| SSML builder | `python3 -m tts.ssml_builder` |
+| Transformer detector | `python3 -m emotion.transformer_detector` |
+| VADER detector | `python3 -m emotion.vader_detector` |
+| gTTS engine | `python3 -m tts.engines.gtts_engine` |
+
+---
+
+## 7. Running the Application
+
+### 7.1 CLI — Single Sentence
+
+```bash
+conda activate empathy
+cd ~/Documents/vlm/empathy_engine
+python3 cli.py "I cannot believe this happened again!"
+```
+
+### 7.2 CLI — Demo Mode (All Emotions)
+
+```bash
+python3 cli.py --demo
+```
+
+### 7.3 CLI — Batch from File
+
+```bash
+python3 cli.py --file sentences.txt
+```
+
+### 7.4 CLI — Override Detector
+
+```bash
+python3 cli.py "text here" --emotion vader
+python3 cli.py "text here" --emotion transformer
+```
+
+### 7.5 Web Interface
 
 ```bash
 uvicorn web.app:app --reload --port 8000
 ```
 
-Then open **http://localhost:8000** in your browser.
+Then open `http://localhost:8000` in your browser.
 
-### Run individual modules directly (for testing)
-
-```bash
-# Test VADER detector
-python emotion/vader_detector.py
-
-# Test Transformer detector
-python emotion/transformer_detector.py
-
-# Test voice mapper
-python tts/voice_mapper.py
-
-# Test SSML builder
-python tts/ssml_builder.py
-
-# Test gTTS engine
-python tts/engines/gtts_engine.py
-```
-
----
-
-## Emotion → Voice Mapping Logic
-
-### Parameter table (at intensity = 1.0)
-
-| Emotion  | Rate    | Pitch   | Volume | Emphasis |
-|----------|---------|---------|--------|----------|
-| joy      | +30%    | +3.5 st | +4 dB  | strong   |
-| surprise | +20%    | +4.0 st | +3 dB  | strong   |
-| anger    | +25%    | +2.0 st | +6 dB  | strong   |
-| disgust  | −10%    | −1.5 st | +2 dB  | moderate |
-| fear     | +15%    | +2.5 st | −2 dB  | moderate |
-| sadness  | −25%    | −3.5 st | −3 dB  | none     |
-| neutral  | 0%      | 0 st    | 0 dB   | none     |
-
-### Intensity scaling
-
-Every parameter is multiplied by the detected intensity score (0–1):
-
-```
-rate_percent  = 100 + rate_delta  × intensity
-pitch_st      = base_pitch_st     × intensity
-volume_db     = base_volume_db    × intensity
-```
-
-This means "This is good" (joy @ 0.45) produces subtle modulation,
-while "THIS IS THE BEST DAY EVER!" (joy @ 0.97) produces dramatic modulation.
-
-### Emphasis downgrade
-
-The `<emphasis>` level is automatically reduced for low-intensity detections:
-- intensity < 0.35 → `none`
-- intensity < 0.65 → `moderate` (even if template says `strong`)
-- intensity ≥ 0.65 → use template value
-
-### Design rationale
-
-- **High arousal emotions** (anger, joy, surprise) get faster speech because research shows
-  humans naturally speak faster when emotionally activated.
-- **Low arousal emotions** (sadness) get slower speech + leading pause to simulate the
-  hesitation and effort of speaking while distressed.
-- **Fear** is fast but quieter — mimicking hushed, anxious speech.
-- **Disgust** is slightly slower and lower — the "ugh" vocal quality.
-
----
-
-## TTS Engine Comparison
-
-| Engine         | Quality | SSML | Cost          | Offline | Setup difficulty |
-|----------------|---------|------|---------------|---------|-----------------|
-| pyttsx3        | ★★☆☆☆  | ✗    | Free          | ✓       | None            |
-| gTTS           | ★★★☆☆  | ✗    | Free          | ✗       | None            |
-| Google Cloud   | ★★★★☆  | ✓    | $4/1M chars   | ✗       | Service account |
-| ElevenLabs     | ★★★★★  | ✗    | $5/mo (30K)   | ✗       | API key         |
-
-**Recommendation:**
-- Start with `gtts` (zero setup, good quality)
-- Switch to `google_cloud` for SSML-driven prosody (best accuracy)
-- Use `elevenlabs` for the most human-sounding output
-
----
-
-## Fine-Tuning the Emotion Model
-
-You only need this if you want to train on your own domain-specific data (e.g. customer service transcripts). The pretrained model works well out of the box.
-
-### Step 1: Prepare dataset
-
-Download GoEmotions from https://github.com/google-research/google-research/tree/master/goemotions/data
+### 7.6 Multi-Emotion Pipeline Test
 
 ```bash
-python utils/prepare_training_data.py \
-    --goemotions_dir path/to/goemotions/data \
-    --output data/
-```
+python3 -c "
+from pipeline import EmpathyPipeline
+p = EmpathyPipeline()
 
-Or create `data/train.csv` manually (one row per sample):
-```
-"I love this product!",joy
-"This is terrible.",anger
-"Please hold.",neutral
-```
+sentences = [
+    ('I cannot believe this happened again, every single time I call nothing gets fixed!!!',  'frustrated_urgent'),
+    ('Oh wow that is absolutely incredible, I love this deal, sign me up right now!',         'excited_joy'),
+    ('I am so relieved, finally someone sorted this out, thank you so much!',                 'relief_joy'),
+    ('Wait, are you serious? That sounds too good to be true, what is the catch?',            'surprised_skeptical'),
+    ('I understand that must have been really difficult for you, we will sort this out.',      'empathy_calm'),
+    ('I have been on hold for forty minutes and nobody can give me a straight answer!!!',     'frustrated_anger'),
+    ('I do not understand what you mean by that, can you explain in simple terms please?',    'confused_neutral'),
+    ('I am scared my account has been compromised, I need this checked immediately!',         'fear_urgent'),
+    ('I thought this was a premium service but the quality has really let me down.',          'disappointment_sadness'),
+    ('This is absolutely disgusting behavior, I want to speak to a manager right now!!!',     'anger_disgust'),
+]
 
-### Step 2: Fine-tune
-
-```python
-from emotion.transformer_detector import fine_tune
-
-fine_tune(
-    train_csv  = "data/train.csv",
-    val_csv    = "data/val.csv",
-    output_dir = "models/emotion_finetuned",
-    epochs     = 4,
-    batch_size = 16,
-)
-```
-
-### Step 3: Use your fine-tuned model
-
-In `.env`:
-```env
-EMOTION_MODEL=transformer
-```
-
-In `emotion/transformer_detector.py`, change:
-```python
-MODEL_ID = "models/emotion_finetuned"
-```
-
-### Step 4: Evaluate
-
-```bash
-python utils/evaluate.py --csv data/val.csv --model transformer
+for text, label in sentences:
+    print('=' * 70)
+    r = p.run(text, filename=f'{label}.mp3')
+    print(f'TEXT:     {text[:70]}')
+    print(f'EMOTIONS:')
+    top = sorted(r.emotion_vector.items(), key=lambda x: x[1], reverse=True)
+    for emotion, score in top:
+        if score < 0.08:
+            continue
+        bar = chr(9608) * int(score * 20)
+        print(f'  {emotion:15s} {score:.2f} {bar}')
+    print(f'DOMINANT: {r.emotion}  secondary={r.secondary}  intensity={r.intensity:.2f}')
+    print(f'VOICE:    rate={r.rate_percent:.0f}%  pitch={r.pitch_hz:.0f}Hz({r.pitch_st:+.2f}st)  vol={r.volume_db:+.1f}dB')
+    print(f'AUDIO:    {r.audio_path}')
+    print()
+"
 ```
 
 ---
 
-## API Reference
+## 8. Switching Between Detectors
 
-### POST /synthesize
+Both detectors return the same `EmotionVector` format and are fully interchangeable.
 
-**Request:**
-```json
-{ "text": "I can't believe how amazing this is!" }
-```
-
-**Response:**
-```json
-{
-  "emotion":      "joy",
-  "intensity":    0.91,
-  "secondary":    "surprise",
-  "rate_percent": 127.3,
-  "pitch_st":     3.19,
-  "volume_db":    3.64,
-  "emphasis":     "strong",
-  "audio_url":    "/audio/joy_a3f8b2c1.mp3",
-  "latency_ms":   843
-}
-```
-
-### GET /audio/{filename}
-
-Returns the generated audio file (MP3 or WAV).
-
-### GET /health
-
-Returns `{"status": "ok", "pipeline_loaded": true}`.
+| Setting | Description |
+|---|---|
+| `EMOTION_MODEL=transformer` | HuggingFace DistilRoBERTa — most accurate, handles negation and context, ~200ms latency |
+| `EMOTION_MODEL=vader` | Keyword-based — instant, offline, 100–200 keywords per emotion, great on short texts and heavy punctuation |
 
 ---
 
-## Design Decisions
+## 9. Troubleshooting
 
-**Why DistilRoBERTa over BERT?**
-DistilRoBERTa is 40% smaller and 60% faster than RoBERTa-base while retaining ~97% of its accuracy. For a real-time service this latency reduction matters significantly.
+| Error | Fix |
+|---|---|
+| `No module named 'transformers'` | `pip install transformers` inside `conda activate empathy` |
+| `No module named 'tts'` | Run from project root using `python3 -m tts.module_name` |
+| `llvmlite build failed` | Wrong Python version — use `conda create -n empathy python=3.11` |
+| `ffmpeg not found` | `sudo apt install ffmpeg` then restart terminal |
+| Audio sounds robotic | `pip install soxr` — enables high quality resampler |
+| `platformdirs not found` | `conda install platformdirs -c conda-forge -y` |
+| Intensity too low | Set `EMOTION_MODEL=transformer` for better intensity scoring |
+| Port 8000 in use | `uvicorn web.app:app --port 8001` |
+| `No module named 'dotenv'` | `pip install python-dotenv` |
+| `Object of type float32 is not JSON serializable` | Use `float(v)` before `json.dumps` in `_log_training_sample` |
 
-**Why intensity scaling instead of binary thresholds?**
-A binary "happy/not happy" switch produces jarring, unnatural transitions. The continuous intensity score (derived from the model's confidence) creates smooth, proportional modulation — the same way human vocal expressiveness scales with emotional arousal.
+---
 
-**Why pydub for gTTS post-processing?**
-gTTS produces natural-sounding speech but has no prosody API. pydub's frame-rate resampling trick for speed/pitch is acoustically equivalent to time-domain stretching for short clips, and requires no additional dependencies beyond ffmpeg.
+## 10. Complete Environment Summary
 
-**Why SSML for Google Cloud?**
-Server-side SSML processing produces significantly more natural results than client-side audio manipulation. The synthesis model can apply prosody changes at the phoneme level rather than stretching/resampling the final audio waveform.
-
-**Why is sadness slower with a leading pause?**
-This follows the Brunswik Lens Model of vocal emotion expression: sadness is characterized by low speech rate, low pitch, low intensity, and longer inter-utterance pauses. The 600ms leading break before sad speech mimics the effortful, reluctant quality of grieving speech.
+| Package | Purpose |
+|---|---|
+| `transformers` | HuggingFace emotion classification model |
+| `torch` | PyTorch backend for transformer inference |
+| `librosa` | Time-stretching, pitch-shifting, audio analysis |
+| `soundfile` | WAV file read/write |
+| `soxr` | High quality audio resampler (eliminates robotic artifacts) |
+| `gTTS` | Google Text-to-Speech free API |
+| `pydub` | MP3 export via ffmpeg |
+| `fastapi` | Web server for the browser UI |
+| `uvicorn` | ASGI server to run FastAPI |
+| `python-dotenv` | Load `.env` configuration file |
+| `vaderSentiment` | Rule-based sentiment for VADER detector |
+| `numpy` | Numerical operations for neural network |
+| `scipy` | Signal processing utilities |
+| `platformdirs` | Required by librosa dependency pooch |
+| `soxr` | High quality resampler for pitch shift |
